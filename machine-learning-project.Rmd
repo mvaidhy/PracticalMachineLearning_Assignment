@@ -1,0 +1,198 @@
+---
+title: "Detecting Correct Weight Lifting Motions using Machine Learning"
+author: "M Vaidhyanathan"
+date: "February 8, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This work has been done to meet the requirments for the final assignment for the Coursera class "Practical Machine Learning". 
+
+We are working with a dataset that was collected from multiple devices that were worn by a set of weight lifters. These sensors measured
+various motion parameters (speed, acceleration, etc.) in all six dimensions. The idea behind this data collection is to see 
+whether one can detect if the wearer is using the correct technique (labeled Classe "E" in the data) based on the device 
+measurements.
+
+Full details of the study can be found in Velloso et al [1] or the archived version of their [web page](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har). The data for this exercise were obtained from [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv). We gratefully acknowledge the authors for
+making this data available to students like me.
+
+## Libraries and Data Loading
+
+We start with loading the necessary libraries and reading the data from the files. This is an 
+exercise in machine learning, and I am primarily going to use the `caret` library for this purpose.
+```{r message=FALSE, warning=FALSE}
+library(caret)
+library(dplyr)
+library(data.table)
+
+data_test <- fread("pml-testing.csv")
+data_train <- fread("pml-training.csv")
+
+dim(data_train)
+```
+
+## Data Exploration
+
+First thing to notice here is that the data set is very large and it has a huge number of columns. So trying
+to visually inspect the variables by plotting them is not going to be easy. Anyway, we can use the `str` function
+to inspect that data. I am not showing the results here, but it appears that are plenty of columns which are mostly
+empty. Let us remove these columns since they will not be likely to be helpful with predicting.
+```{r cache=TRUE}
+useful_cols <- names(data_train)[colMeans(is.na(data_train)) < 0.8]
+```
+
+Also, the first eight columns only have measurement identifiers, they are not predictive variables. So let us 
+mark them for deletion also. Then let us build a narrower data set by dropping the identified columns. Finally,
+let's make the main outcome variable (type of motion), which is called `classe` in the data set to a 
+factor variable.
+```{r cache=TRUE}
+useful_cols <- useful_cols[8:length(useful_cols)]
+
+data_train_sm <- data_train %>% select(useful_cols)
+data_train_sm$classe = factor(data_train_sm$classe)
+```
+We are left with 52 predictor variables in `data_train_sm`.The following two checks show 
+that all rows have meaningful values for `classe` and there are no `NA`s in 
+any of the predictor variable columns. So we do not have to delete any rows or impute
+missing values.
+```{r cache = TRUE}
+unique(data_train$classe)
+names(data_train_sm)[colMeans(is.na(data_train_sm)) > 0]
+```
+## Prepration for Training
+My approach will be to try to use a few different machine learning methods and see which one is
+most accurate. For this exercise speed will not be a criterion. Even though separate packages are 
+available for different methods, we will use `caret` versions only.
+
+The data set `data_train` is large, it has `19,622` rows. So we have enough data for boot strapping
+or cross validation. We will use 75% for training and 25% for test.
+```{r cache=TRUE}
+inTrain = createDataPartition(data_train_sm$classe, p = 0.75)[[1]]
+training = data_train_sm[ inTrain,]
+testing <- data_train_sm[-inTrain,]
+```
+
+## Model set up training
+
+I will use four different machine learning methods. For each one of them we will compute the
+accuracy for out of sample predictions.
+
+### 1. Recursive Partitioning
+
+The first method I will try will be a simple 'out of the box' recursive partitioning. I will
+just use the default settings offered by `caret`. No cross validation will be used. 
+```{r cache = TRUE, message=FALSE, warning=FALSE}
+set.seed(1581)
+start <- proc.time()
+model_rpart <- train(classe ~ ., method="rpart", data = training)
+time_rpart <- proc.time() - start
+
+prediction_rpart <- predict(model_rpart, testing)
+cfm_rpart <- confusionMatrix(testing$classe, prediction_rpart)
+accuracy_rpart <- cfm_rpart$overall["Accuracy"]
+```
+### 2. Recursive Partitioning with Tuning
+
+Since we have plenty of data, some cross validation will definitely help with the training. In this
+version, we still use recursive partitioning, but also use repeated cross validation (`repeatedcv`)
+with 4-fold cross validation, repeated 5 times.
+```{r cache = TRUE, message=FALSE, warning=FALSE}
+set.seed(1581)
+start <- proc.time()
+train_control <- trainControl(method = "repeatedcv", number = 4, repeats = 5, summaryFunction = multiClassSummary, classProbs = TRUE)
+model_rpart_rcv <- train(classe ~ ., method="rpart", data = training, tuneLength = 50, metric = "Accuracy", trControl=train_control)
+time_rpart_rcv <- proc.time() - start
+
+prediction_rpart_rcv <- predict(model_rpart_rcv, testing)
+cfm_rpart_rcv <- confusionMatrix(testing$classe, prediction_rpart_rcv)
+accuracy_rpart_rcv <- cfm_rpart_rcv$overall["Accuracy"]
+```
+### 3. Gradient Boosting
+
+Let us throw some more power into the computation by trying a couple of ensemeble methods. First
+I will try Gradient Boosting. It appears that this method is harder to tune. I will just use
+it with default settings. Since this method tends to be slow, I will first reduce the number
+predictor variables using PCA (Principle Component Analysis). Using PCA with a threshold of 95%
+of variability reduces the number of variables from 52 to 26.
+```{r cache = TRUE, message=FALSE, warning=FALSE}
+set.seed(1581)
+pca <- preProcess(training, method="pca", thresh = 0.95)
+training_pca <- predict(pca, training)
+testing_pca <- predict(pca, testing)
+
+start <- proc.time()
+model_gbm_pca <- train(classe~., method="gbm", data=training_pca, verbose = FALSE)
+time_gbm_pca <- proc.time() - start
+
+predict_gbm_pca <- predict(model_gbm_pca, testing_pca)
+cfm_gbm_pca <- confusionMatrix(testing$classe, predict_gbm_pca)
+accuracy_gbm_pca <- cfm_gbm_pca$overall["Accuracy"]
+```
+
+### 4. Random Forest
+
+This is the second ensemble method that I will try. I will use it with 3-fold cross validation,
+with no repeats. I picked this method because it seems to be a very popular method, owing to
+its high accuracy in a wide variety of problems. I did not try tuning the model, the default
+values were used for the two important parameters (`ntree` and `mtry`)
+```{r cache = TRUE, message=FALSE, warning=FALSE}
+set.seed(1581)
+start <- proc.time()
+train_control <- trainControl(method="cv", number=3, verboseIter=TRUE)
+model_rf_cv <- train(classe ~ ., data=training, method="rf", trControl=train_control)
+time_rf_cv <- proc.time() - start
+
+prediction_rf_cv <- predict(model_rf_cv, testing)
+cfm_rf_cv <- confusionMatrix(testing$classe, prediction_rf_cv)
+accuracy_rf_cv <- cfm_rf_cv$overall["Accuracy"]
+```
+
+## Comparing Results
+Now let us compare the results from these four methods.
+```{r cache = TRUE, message=FALSE, warning=FALSE}
+results <- data.frame(model = c("rpart", "rpart_rcv", "gbm", "rf"), 
+                      accuracy = c(accuracy_rpart, accuracy_rpart_rcv, accuracy_gbm_pca, accuracy_rf_cv), 
+                      sys_time = c(time_rpart[2], time_rpart_rcv[2], time_gbm_pca[2], time_rf_cv[2]),
+                      user_time = c(time_rpart[1], time_rpart_rcv[1], time_gbm_pca[1], time_rf_cv[1]))
+results
+```
+While not very fast, random forest seems to give the most accurate results (99%), even with no tuning. So
+this would be my recommended method.
+
+The default recursive partitioning has very poor accuracy, Gradient Boosting is not so great
+even though it takes a long time to run, but recursive partioning with cross validation is 
+90% accurate and reasonably fast. Howerver, I have to learn a lot about tuning before
+passing judgment on these various method.
+
+Just to get some insight into the details, let us look at the top predictors as identified
+by the random forest method. We will use the variable importance metric.
+```{r}
+variable_importance <- varImp(model_rf_cv$finalModel)
+vi_out <- data.frame(variable = row.names(variable_importance), value = variable_importance$Overall)
+vi_out <- vi_out %>% arrange(desc(value)) %>% head(16)
+vi_out
+```
+
+## Predicting the Test Cases
+Finally I will predict `classe` for the 20 test cases given. While you should only care
+about the results from the random forest method, I will present the predicted values from
+all four methods.
+```{r cache=TRUE, message=FALSE, warning=FALSE}
+prediction_all <- t(cbind(
+    rpart=as.data.frame(predict(model_rpart, data_test), optional=TRUE),
+    rpart_rcv=as.data.frame(predict(model_rpart_rcv, data_test), optional=TRUE),
+    gbm_pca=as.data.frame(predict(model_gbm_pca, predict(pca, data_test)), optional=TRUE),
+    rf_cv=as.data.frame(predict(model_rf_cv, data_test), optional=TRUE)
+))
+prediction_all
+```
+
+## References
+
+[1]: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
