@@ -10,3 +10,5 @@ measurements.
 
 The markdown file has all the details.
 
+You can view the rendered HTML file using this link: 
+http://htmlpreview.github.io/?https://github.com/mvaidhy/PracticalMachineLearning_Assignment/blob/master/machine-learning-project.html
